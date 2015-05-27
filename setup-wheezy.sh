@@ -108,6 +108,21 @@ END
 	fi
 }
 
+function add_my_user {
+    if [ -z `grep $USER: /etc/passwd` ]; then
+        useradd -m -g www-data $USER
+        sudo -u $USER mkdir /home/$USER/.ssh && sudo -u $USER chmod 700 /home/$USER/.ssh
+        sudo -u $USER cat > /home/$USER/.ssh/authorized_keys <<END
+$PUBKEY
+END
+    chown -R $USER /home/$USER/
+    sudo -u $USER chmod 600 /home/$USER/.ssh/authorized_keys
+    cat >> /etc/sudoers.d/users <<END
+$USER   ALL=(ALL) NOPASSWD: ALL
+END
+    fi
+}
+
 function install_dropbear {
     if [ "$DISTRIBUTION" = "wheezy" ]; then
 	    check_upgrade ssh "ssh" "-t wheezy-backports"
@@ -161,6 +176,59 @@ END
     if [ -z "`grep 'ssh_host_ed25519_key' /etc/ssh/sshd_config`" ];then
         echo "HostKey /etc/ssh/ssh_host_ed25519_key" >>/etc/ssh/sshd_config
     fi
+}
+
+function install_ssh {
+    check_install ssh "ssh"
+    check_install rsync "rsync"
+    check_remove dropbear "dropbear"
+
+    # Disable SSH
+    invoke-rc.d ssh stop
+
+    if [ -z $SSH_PORT ];then
+        SSH_PORT=22
+        print_info "SSH port set to 22"
+    else
+        if [ $SSH_PORT -le 65535 ]; then
+            print_info "SSH port set to $SSH_PORT"
+        else
+            SSH_PORT=22
+            print_warn "SSH port changed to 22"
+        fi
+    fi
+    cat > /etc/ssh/sshd_config <<END
+Port $SSH_PORT
+Protocol 2
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_dsa_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+UsePrivilegeSeparation yes
+KeyRegenerationInterval 3600
+ServerKeyBits 768
+SyslogFacility AUTH
+LogLevel INFO
+LoginGraceTime 120
+PermitRootLogin no
+StrictModes yes
+RSAAuthentication yes
+PubkeyAuthentication yes
+IgnoreRhosts yes
+RhostsRSAAuthentication no
+HostbasedAuthentication no
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+PasswordAuthentication no
+X11Forwarding no
+X11DisplayOffset 10
+PrintMotd no
+PrintLastLog yes
+TCPKeepAlive yes
+AcceptEnv LANG LC_*
+Subsystem sftp /usr/lib/openssh/sftp-server
+UsePAM yes
+END
+    invoke-rc.d ssh start
 }
 
 function install_postfix {
@@ -552,7 +620,6 @@ function install_domain {
     if [ ! -d /var/www/$2 ]; then
 		mkdir /var/www/$2
 	fi
-	chown www-data:www-data /var/www/$2
     cat > "/var/www/$2/index.html" <<END
 <html><head>
 <title>$2</title>
@@ -605,7 +672,8 @@ END
  	include nophp.conf;
 #	include fcgiwrap.conf;
 	include nocgi.conf;
-	include disallow.conf;
+    include disallow.conf;
+	include /var/www/$2/.*.conf;
 END
 
     cat >> "/etc/nginx/sites-available/$2.conf" <<END
@@ -621,6 +689,7 @@ allow all;
 END
 
     ln -s /etc/nginx/sites-available/$2.conf /etc/nginx/sites-enabled/$2.conf
+    chown -R $USER:www-data /var/www/$2
     invoke-rc.d nginx reload
 }
 function install_iptables {
@@ -1433,7 +1502,7 @@ END
         fi
     fi
 	check_install sudo "sudo"
-	add_user
+	add_my_user
     check_install dialog "dialog"
     check_install ca-certificates "ca-certificates"
     check_install locales "locales"
@@ -1444,15 +1513,15 @@ END
     check_install cron "cron"
     install_dash
     install_syslogd
-    install_dropbear
+    install_ssh
     if [ -z "`grep '! -d /run/sshd' /etc/crontab`" ];then
             echo "@reboot root if [ ! -d /run/sshd ]; then mkdir /run/sshd;fi" >> /etc/crontab
     fi
-    echo -n "To change root password press y then [ENTER]: "
-    read -e reply
-    if [ "$reply" = "y" ]; then
-        passwd
-    fi
+    # echo -n "To change root password press y then [ENTER]: "
+    # read -e reply
+    # if [ "$reply" = "y" ]; then
+    #     passwd
+    # fi
 }
 
 #                                      OPTIONAL
@@ -1518,7 +1587,7 @@ END
 ########################################################################
 # START OF PROGRAM
 ########################################################################
-if [ "$1" = "system" -o "$1" = "all" -o "$1" = "postfix" -o "$1" = "iptables" -o "$1" = "mysql" -o "$1" = "percona" -o "$1" = "nginx" -o "$1" = "nginx-upstream" -o "$1" = "php" -o "$1" = "cgi" -o "$1" = "domain" -o "$1" = "wordpress" -o "$1" = "friendica" -o "$1" = "red" -o "$1" = "custom" -o "$1" = "upgrade" ]; then
+if [ "$1" = "system" -o "$1" = "all" -o "$1" = "postfix" -o "$1" = "iptables" -o "$1" = "mysql" -o "$1" = "percona" -o "$1" = "nginx" -o "$1" = "nginx-upstream" -o "$1" = "php" -o "$1" = "cgi" -o "$1" = "domain" -o "$1" = "wordpress" -o "$1" = "friendica" -o "$1" = "red" -o "$1" = "custom" -o "$1" = "upgrade" -o "$1" = "new" ]; then
 	echo option found
 else
     echo 'Usage:' `basename $0` '[option]'
@@ -1530,22 +1599,24 @@ else
     exit 1
 fi
 export PATH=/bin:/usr/bin:/sbin:/usr/sbin
+export DEBIAN_FRONTEND=noninteractive
 
 check_sanity
-if [ ! -f ./setup-debian.conf ]; then
-    cat > ./setup-debian.conf <<END
-SSH_PORT=1234 # Change 1234 to the port of your choice
+if [ ! -f /root/setup-debian.conf ]; then
+    cat > /root/setup-debian.conf <<END
+PUBKEY="$2"
+SSH_PORT="$4"
 INTERFACE=all # Options are all for a dual stack ipv4/ipv6 server
 #                           ipv4 for an ipv4 server
 #                           ipv6 for an ipv6 server
 #               Defaults to ipv4 only if incorrect
-USER=changeme
+USER="$3"
 EMAIL=\$USER@[127.0.0.1] # mail user or an external email address
 OPENVZ=yes # Values are yes, no or gnome
 DISTRIBUTION=wheezy # Does not do anything yet, left in for jessie
 SERVER=nginx # Deprecated, now unused
 CPUCORES=detect # Options are detect or n where n = number of cpu cores to be used
-MEMORY=128 # values are low, 64, 96, 128, 192, 256, 384, 512, 1024, 2048 - use 2048 if more memory is available
+MEMORY="$5" # values are low, 64, 96, 128, 192, 256, 384, 512, 1024, 2048 - use 2048 if more memory is available
 FRIENDICASSL=none # values are none, sslonly & both both is http & https. sslonly & both require a pre-installed signed ssl cert
 REDSSL=none # values are none, sslonly & both both is http & https. sslonly & both require a pre-installed signed ssl cert
 # SELF SIGNED SSL CERTS ARE NOT SUPPORTED
@@ -1553,38 +1624,38 @@ REDSSL=none # values are none, sslonly & both both is http & https. sslonly & bo
 END
 fi
 
-if [ -z "`grep 'USER=' ./setup-debian.conf`" ]; then
-	sed -i "s/EMAIL=/USER=changeme\\nEMAIL=/" ./setup-debian.conf
+if [ -z "`grep 'USER=' /root/setup-debian.conf`" ]; then
+	sed -i "s/EMAIL=/USER=changeme\\nEMAIL=/" /root/setup-debian.conf
 fi
-if [ -z "`grep 'CPUCORES=' ./setup-debian.conf`" ]; then
-    echo CPUCORES=detect \# Options are detect or n where n = number of cpu cores to be used >> ./setup-debian.conf
+if [ -z "`grep 'CPUCORES=' /root/setup-debian.conf`" ]; then
+    echo CPUCORES=detect \# Options are detect or n where n = number of cpu cores to be used >> /root/setup-debian.conf
 fi
-if [ -z "`grep 'MEMORY=' ./setup-debian.conf`" ]; then
-	echo MEMORY=128 \# values are low, 64, 96, 128, 192, 256, 384, 512, 1024, 2048 - use 2048 if more memory is available >> ./setup-debian.conf
+if [ -z "`grep 'MEMORY=' /root/setup-debian.conf`" ]; then
+	echo MEMORY=128 \# values are low, 64, 96, 128, 192, 256, 384, 512, 1024, 2048 - use 2048 if more memory is available >> /root/setup-debian.conf
 fi
-if [ -z "`grep 'DISTRIBUTION=' ./setup-debian.conf`" ]; then
-    echo DISTRIBUTION=wheezy \# Value is wheezy >> ./setup-debian.conf
+if [ -z "`grep 'DISTRIBUTION=' /root/setup-debian.conf`" ]; then
+    echo DISTRIBUTION=wheezy \# Value is wheezy >> /root/setup-debian.conf
 fi
-if [ -z "`grep 'SERVER=' ./setup-debian.conf`" ]; then
-    echo SERVER=nginx \# Deprecated, now unused >> ./setup-debian.conf
+if [ -z "`grep 'SERVER=' /root/setup-debian.conf`" ]; then
+    echo SERVER=nginx \# Deprecated, now unused >> /root/setup-debian.conf
 fi
-if [ -z "`grep 'FRIENDICASSL=' ./setup-debian.conf`" ]; then
-    echo FRIENDICASSL=none \# values are none, sslonly \& both both is http \& https. sslonly \& both require a pre-installed signed ssl cert >> ./setup-debian.conf
+if [ -z "`grep 'FRIENDICASSL=' /root/setup-debian.conf`" ]; then
+    echo FRIENDICASSL=none \# values are none, sslonly \& both both is http \& https. sslonly \& both require a pre-installed signed ssl cert >> /root/setup-debian.conf
 fi
-if [ -z "`grep 'REDSSL=' ./setup-debian.conf`" ]; then
-    echo REDSSL=none \# values are none, sslonly \& both both is http \& https. sslonly \& both require a pre-installed signed ssl cert >> ./setup-debian.conf
+if [ -z "`grep 'REDSSL=' /root/setup-debian.conf`" ]; then
+    echo REDSSL=none \# values are none, sslonly \& both both is http \& https. sslonly \& both require a pre-installed signed ssl cert >> /root/setup-debian.conf
 fi
-if [ -z "`grep 'SELF SIGNED' ./setup-debian.conf`" ]; then
-    echo \# SELF SIGNED SSL CERTS ARE NOT SUPPORTED >> ./setup-debian.conf
+if [ -z "`grep 'SELF SIGNED' /root/setup-debian.conf`" ]; then
+    echo \# SELF SIGNED SSL CERTS ARE NOT SUPPORTED >> /root/setup-debian.conf
 fi
 if [ -z "`which "$1" 2>/dev/null`" -a ! "$1" = "domain" -a ! "$1" = "nginx" -a ! "$1" = "nginx-upstream" -a ! "$1" = "percona" ]; then
     apt-get -q -y update
     check_install nano "nano"
 fi
-if [ ! "$1" = "domain" ]; then
-	nano ./setup-debian.conf
-fi
-[ -r ./setup-debian.conf ] && . ./setup-debian.conf
+# if [ ! "$1" = "domain" ]; then
+# 	nano /root/setup-debian.conf
+# fi
+[ -r /root/setup-debian.conf ] && . /root/setup-debian.conf
 
 if [ "$CPUCORES" = "detect" ]; then
 	CPUCORES=`grep -c processor //proc/cpuinfo`
@@ -1609,6 +1680,11 @@ all)
     install_php
 #    install_cgi
 #    install_iptables $SSH_PORT
+    ;;
+new)
+    remove_unneeded
+    update_upgrade
+    install_nginx
     ;;
 postfix)
     add_user
